@@ -1,13 +1,13 @@
 ﻿using System;
 using System.IO;
 using System.Linq;
-using System.Threading.Tasks;
-using System.Management;
 
 namespace FileSHFR
 {
     internal class FileSHFR
     {
+        private const int BufferSize = 4 * 1024 * 1024; // 4MB
+
         static void Main(string[] args)
         {
             try
@@ -44,73 +44,85 @@ namespace FileSHFR
 
         static void Encrypt(string inputPath, int algorithmId)
         {
-            byte[] data = File.ReadAllBytes(inputPath);
-            byte[] encryptedData = ProcessInParallel(data, algorithmId);
-
-            string directory = Path.GetDirectoryName(inputPath);
-            if (directory == null)
+            string dir = Path.GetDirectoryName(inputPath);
+            if (dir == null) 
             {
-                throw new ArgumentException("Не удалось определить директорию исходного файла.");
+                throw new ArgumentException("Не удалось определить директорию файла.");
             }
-            string outputFileName = Path.Combine(directory, Path.GetFileNameWithoutExtension(inputPath) + ".shfr");
+            string outputPath = Path.Combine(dir, Path.GetFileNameWithoutExtension(inputPath) + ".shfr");
 
-            File.WriteAllBytes(outputFileName, encryptedData);
+            if (algorithmId == 0)
+            {
+                ReverseFile(inputPath, outputPath);
+            }
+            else
+            {
+                ProcessStream(inputPath, outputPath, algorithmId);
+            }
+
             File.Delete(inputPath);
         }
 
         static void Decrypt(string inputPath, string extension, int algorithmId)
         {
             if (Path.GetExtension(inputPath) != ".shfr")
-            {
                 throw new ArgumentException("Дешифровка требует файл с расширением .shfr");
+
+            string dir = Path.GetDirectoryName(inputPath);
+            if (dir == null) 
+            {
+                throw new ArgumentException("Не удалось определить директорию файла.");
+            }
+            string outputPath = Path.Combine(dir, Path.GetFileNameWithoutExtension(inputPath) + "." + extension.TrimStart('.'));
+
+            if (algorithmId == 0)
+            {
+                ReverseFile(inputPath, outputPath);
+            }
+            else
+            {
+                ProcessStream(inputPath, outputPath, algorithmId);
             }
 
-            byte[] data = File.ReadAllBytes(inputPath);
-            byte[] decryptedData = ProcessInParallel(data, algorithmId);
-
-            string directory = Path.GetDirectoryName(inputPath);
-            if (directory == null) 
-            { 
-                throw new ArgumentException("Не удалось определить директорию исходного файла."); 
-            }
-
-            string baseName = Path.Combine(directory, Path.GetFileNameWithoutExtension(inputPath) + "." + extension.TrimStart('.'));
-
-            File.WriteAllBytes(baseName, decryptedData);
             File.Delete(inputPath);
         }
 
-        private static byte[] ProcessInParallel(byte[] data, int algorithmId)
+        static void ProcessStream(string inputPath, string outputPath, int algorithmId)
         {
-            int coreCount = GetPhysicalCoreCount();
-            int chunkSize = data.Length / coreCount + (data.Length % coreCount == 0 ? 0 : 1);
-            byte[][] chunks = Enumerable.Range(0, coreCount).Select(i => data.Skip(i * chunkSize).Take(chunkSize).ToArray()).ToArray();
-
-            Parallel.For(0, coreCount, i => 
+            using (FileStream input = new FileStream(inputPath, FileMode.Open, FileAccess.Read))
+            using (FileStream output = new FileStream(outputPath, FileMode.Create, FileAccess.Write))
             {
-                chunks[i] = ApplyCipher(chunks[i], algorithmId);
-            });
+                byte[] buffer = new byte[BufferSize];
+                int bytesRead;
 
-            return chunks.SelectMany(chunk => chunk).ToArray();
+                while ((bytesRead = input.Read(buffer, 0, buffer.Length)) > 0)
+                {
+                    byte[] actualData = buffer.Take(bytesRead).ToArray();
+                    byte[] processed = ApplyCipher(actualData, algorithmId);
+                    output.Write(processed, 0, processed.Length);
+                }
+            }
         }
 
-        private static int GetPhysicalCoreCount()
+        static void ReverseFile(string inputPath, string outputPath)
         {
-            try
+            using (FileStream input = new FileStream(inputPath, FileMode.Open, FileAccess.Read))
+            using (FileStream output = new FileStream(outputPath, FileMode.Create, FileAccess.Write))
             {
-                int count = 0;
-                using (var searcher = new ManagementObjectSearcher("select NumberOfCores from Win32_Processor"))
+                long length = input.Length;
+                byte[] buffer = new byte[BufferSize];
+
+                for (long pos = length; pos > 0;)
                 {
-                    foreach (var item in searcher.Get())
-                    {
-                        count += int.Parse(item["NumberOfCores"].ToString());
-                    }
+                    int readSize = (int)Math.Min(BufferSize, pos);
+                    pos -= readSize;
+
+                    input.Seek(pos, SeekOrigin.Begin);
+                    input.Read(buffer, 0, readSize);
+
+                    Array.Reverse(buffer, 0, readSize);
+                    output.Write(buffer, 0, readSize);
                 }
-                return Math.Max(1, count);
-            }
-            catch
-            {
-                return Environment.ProcessorCount / 2;
             }
         }
 
@@ -118,35 +130,28 @@ namespace FileSHFR
         {
             switch (algorithmId)
             {
-                case 0: return ReverseBytes(data);
                 case 1: return SwapOddEvenBytes(data);
-                case 2: return XorCipher(data, key: 0x55);
-                default: throw new ArgumentException("Неизвестный номер алгоритма.");
+                case 2: return XorCipher(data, 0x55);
+                default: throw new ArgumentException("Алгоритм не поддерживает потоковую обработку или неизвестен.");
             }
-        }
-
-        private static byte[] ReverseBytes(byte[] data)
-        {
-            byte[] result = new byte[data.Length];
-            Array.Copy(data, result, data.Length);
-            Array.Reverse(result);
-            return result;
         }
 
         private static byte[] SwapOddEvenBytes(byte[] data)
         {
             byte[] result = new byte[data.Length];
-            for (int i = 0; i < data.Length; i++)
+            int i = 0;
+            while (i < data.Length)
             {
-                if (i % 2 == 0 && i + 1 < data.Length)
+                if (i + 1 < data.Length)
                 {
                     result[i] = data[i + 1];
                     result[i + 1] = data[i];
-                    i++;
+                    i += 2;
                 }
                 else
                 {
                     result[i] = data[i];
+                    i++;
                 }
             }
             return result;
