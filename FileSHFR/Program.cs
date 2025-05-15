@@ -6,7 +6,7 @@ namespace FileSHFR
 {
     internal class FileSHFR
     {
-        private const int BufferSize = 4 * 1024 * 1024; // 4MB
+        private const int BufferSize = 4 * 1024 * 1024; //4MB
 
         static void Main(string[] args)
         {
